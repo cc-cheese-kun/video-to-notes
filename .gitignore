@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+__pycache__/
+重做日志/
+待写稿.txt
+待写稿.txt.*
+.obsidian/workspace*.json

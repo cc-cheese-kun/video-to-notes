@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 复制到 ~/Library/LaunchAgents/，把 /path/to/vault 换成你的知识库路径，然后 launchctl load 它。每天 00:00 跑 夜跑.sh。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.video-night</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>/path/to/vault/夜跑.sh</string></array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/path/to/vault/重做日志/夜跑-launchd.log</string>
+  <key>StandardErrorPath</key><string>/path/to/vault/重做日志/夜跑-launchd.log</string>
+</dict>
+</plist>
