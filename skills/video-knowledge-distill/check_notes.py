@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""视频笔记检查脚本：只检查、不修改。
+"""Note checker for video/article notes: reports only, never edits.
+
+Usage: python3 check_notes.py 02-抖音
+Prints each note's problems: ✗ breaks a rule, ? is suspicious and needs a human
+look. Exit code 1 if any ✗, so it can gate a commit or push.
+Main rules: required front-matter fields; banned hype words; a note based only
+on the caption may not say much more than the caption; timestamps only when the
+video itself was watched; every background fact needs a source with a date.
+
+视频笔记检查脚本：只检查、不修改。
 
 用法：python3 check_notes.py 02-抖音
 输出每篇笔记的问题；「✗」是违反规则，「?」是需要人工看一眼的可疑情况。
@@ -10,31 +19,39 @@ import os
 import re
 import sys
 
+# Hype / filler phrases typical of AI-written Chinese ("deep dive", "the essence is"...).
+# AI 腔的空话。
 BANNED = (
     "嚼碎 讲透 硬核 颠覆性 降维 高维 底层逻辑 终极 彻底 惊天 残酷真相 认知升级 "
     "一针见血 直击本质 这意味着 总而言之 综上所述 值得注意的是 深入探讨 赋能 "
     "核心在于 让我们 一起来看看 本文 不难发现"
 ).split()
+# Required front-matter fields: type, platform, title, author, link, basis, created, tags, original caption.
+# 必填字段。
 REQUIRED = ["类型", "平台", "标题", "作者", "链接", "依据", "建立", "标签", "原简介"]
+# Sites that can't be "the full original of the video" (papers, encyclopedias...).
 # 这些网站不可能是「视频本身的完整版」
 NOT_ORIGINAL = ["arxiv.org", "wikipedia.org", "baike.", "etymonline.com", "ctext.org",
                 "zhihu.com", "doi.org", "scholar.google"]
-RATIO_WARN = 3  # 文案笔记「视频讲了什么」字数超过原简介几倍时提醒
+RATIO_WARN = 3  # caption-only note longer than 3x the caption: warn (likely invented). 文案笔记「视频讲了什么」字数超过原简介几倍时提醒
 
 
 def section(body, title):
+    """Text of the '## title' section.  取一节内容。"""
     m = re.search(rf"^## {re.escape(title)}\n(.*?)(?=^## |\Z)", body, re.S | re.M)
     return m.group(1) if m else None
 
 
 def plain_len(text):
-    """去掉标题、列表符号、空白后的字数。"""
+    """Length without headings, list markers and whitespace.  去掉标题、列表符号、空白后的字数。"""
     text = re.sub(r"^#+ .*$", "", text, flags=re.M)
     text = re.sub(r"[\s\-*>#`]", "", text)
     return len(text)
 
 
 def check(path):
+    """All problems for one note, as strings starting with ✗ (rule broken) or ? (look at it).
+    检查一篇笔记。"""
     text = open(path, encoding="utf-8").read()
     m = re.match(r"---\n(.*?)\n---\n(.*)", text, re.S)
     if not m:
@@ -69,6 +86,7 @@ def check(path):
     if section(body, "值得想的") is None:
         bad.append("没有「值得想的」")
 
+    # Caption-only note: the body can't go far beyond what the caption says.
     # 文案笔记：正文不能明显超出原简介
     if basis == "文案" and told is not None:
         if intro_pending:
@@ -81,6 +99,7 @@ def check(path):
         if section(body, "关键原话") is not None:
             bad.append("依据是文案，却有「关键原话」")
 
+    # Basis "original": the link must look like the video itself.
     # 原版：链接要像是视频本身
     if basis == "原版":
         link = field("原版链接") or ""
@@ -94,10 +113,12 @@ def check(path):
         if quotes and not re.search(r"（\d{1,2}:\d{2}(:\d{2})?）", quotes):
             warn.append("依据是原版，关键原话却没有时间戳，确认是否真的读了原版")
 
+    # Timestamps only if the video (or its original) was actually watched.
     # 时间戳只在真看过视频或原版时出现
     if basis == "文案" and re.search(r"（\d{1,2}:\d{2}(:\d{2})?）", body):
         bad.append("依据是文案，却出现了时间戳")
 
+    # Background facts need "(来源：[title](link)，date)".
     # 背景补充的来源格式
     bg = section(body, "背景补充") or ""
     for line in bg.splitlines():
@@ -105,7 +126,7 @@ def check(path):
                 r"来源：\[[^\]]+\]\(https?://[^)]+\)，\d{4}-\d{2}-\d{2}", line):
             bad.append("来源格式不对：" + line[2:28] + "…")
 
-    used = [w for w in BANNED if w in re.sub(r"\[\[[^\]]*\]\]", "", body)]  # 链接里是别人的标题，不算
+    used = [w for w in BANNED if w in re.sub(r"\[\[[^\]]*\]\]", "", body)]  # link text is someone else's title, ignore it. 链接里是别人的标题，不算
     if used:
         bad.append("禁用词：" + "、".join(used))
     bold = len(re.findall(r"\*\*[^*]+\*\*", body))

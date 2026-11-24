@@ -1,3 +1,12 @@
+"""Print the user's own Douyin cookies from local Safari as JSON (for the Playwright
+fallback). yt-dlp is often installed by Homebrew outside the default Python path,
+so its site-packages folders are added first. Returns [] on any error.
+The output contains login cookies: never save it into notes or a repository.
+
+从本机 Safari 读出自己的抖音 cookie，输出 JSON（给 Playwright 兜底用）。
+yt-dlp 常装在 Homebrew 的目录里，先把它的 site-packages 加进路径。出错就返回空列表。
+输出含登录 cookie，不要存进笔记或仓库。
+"""
 import sys, json, os
 
 def get_douyin_cookies():

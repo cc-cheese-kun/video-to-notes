@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""知识库整理脚本：更新索引和每篇笔记的导航「主题」行，并检查标签、主题、链接。
+"""Vault housekeeping: regenerate the index and each note's "topic" navigation line,
+then check tags, topic maps and links.
+
+Usage (from the vault root):
+    python3 整理.py           update index and navigation, then check
+    python3 整理.py --check   check only, change nothing
+The rules live in AGENTS.md; this script does only the mechanical part, so the AI
+never hand-edits generated text:
+- 00-索引.md between the two markers is generated (hand edits get overwritten)
+- each note's "- 主题：" line under "## 导航" is generated from the maps in 04-主题/
+- the "- 相关：" (related) lines are written by the AI; the script only checks links
+Problems are printed; the AI's workflow requires zero before committing.
+
+知识库整理脚本：更新索引和每篇笔记的导航「主题」行，并检查标签、主题、链接。
 
 用法（在知识库根目录）：
     python3 整理.py           更新索引和导航，再检查
@@ -16,32 +29,40 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+# Folders that hold notes: personal notes, video notes, discussions, video making.
+# 存笔记的文件夹。
 NOTE_DIRS = ["01-笔记", "02-抖音", "03-讨论", "05-视频制作"]
+# Personal notes: only the "private" tag, not put on topic maps.  私人笔记：只打私人标签，不挂地图。
 PRIVATE_DIR = "01-笔记"
 THEME_DIR = "04-主题"
 INDEX = "00-索引.md"
 BEGIN = "<!-- 以下由 整理.py 生成，不要手改 -->"
 END = "<!-- 生成结束 -->"
+# Obsidian wiki link [[name]] or [[name|alias]].  Obsidian 双链。
 LINK = re.compile(r"\[\[([^\]]+)\]\]")
 
 errors, warns = [], []
 
 
 def read(p):
+    """Read a vault-relative file ('' if missing).  读文件。"""
     with open(os.path.join(ROOT, p), encoding="utf-8") as f:
         return f.read()
 
 
 def write(p, s):
+    """Write a vault-relative file.  写文件。"""
     with open(os.path.join(ROOT, p), "w", encoding="utf-8") as f:
         f.write(s)
 
 
 def target(link):
+    """[[name#heading|alias]] -> name.  取双链指向的笔记名。"""
     return link.split("|")[0].split("#")[0].strip()
 
 
 def split_fm(s):
+    """Split YAML front matter from the body.  拆出 front matter 和正文。"""
     if s.startswith("---\n"):
         end = s.find("\n---", 4)
         if end != -1:
@@ -50,7 +71,9 @@ def split_fm(s):
 
 
 def load_tag_table():
-    """AGENTS.md 「## 标签表」一节里，每行「- 组名（说明）：a、b、c」。"""
+    """Allowed tags from the "## 标签表" section of AGENTS.md, one group per line:
+    "- group (description): a、b、c". Returns {group: [tags]}.
+    AGENTS.md 「## 标签表」一节里，每行「- 组名（说明）：a、b、c」。"""
     s = read("AGENTS.md")
     m = re.search(r"^## 标签表\n(.*?)(?=^## |\Z)", s, re.S | re.M)
     if not m:
@@ -65,7 +88,10 @@ def load_tag_table():
 
 
 def load_themes():
-    """返回 {主题名: (一句话说明, [(小类, [笔记名])])} 和 {笔记名: [(主题, 小类)]}。"""
+    """Parse the topic maps in 04-主题/. Returns
+    {topic: (one-line description, [(subsection, [note names])])} and
+    {note name: [(topic, subsection)]}.
+    返回 {主题名: (一句话说明, [(小类, [笔记名])])} 和 {笔记名: [(主题, 小类)]}。"""
     themes, where = {}, {}
     for p in sorted(glob.glob(os.path.join(ROOT, THEME_DIR, "*.md"))):
         name = os.path.basename(p)[:-3]
@@ -91,6 +117,7 @@ def load_themes():
 
 
 def load_notes():
+    """{note name: relative path} for every note in NOTE_DIRS.  所有笔记。"""
     notes = {}
     for d in NOTE_DIRS:
         for p in sorted(glob.glob(os.path.join(ROOT, d, "**", "*.md"), recursive=True)):
@@ -100,6 +127,7 @@ def load_notes():
 
 
 def all_names():
+    """Every .md name in the vault, i.e. every valid link target.  全库所有能被链接的名字。"""
     names = set()
     for p in glob.glob(os.path.join(ROOT, "**", "*.md"), recursive=True):
         if "node_modules" not in p:
@@ -108,11 +136,13 @@ def all_names():
 
 
 def summary(s):
+    """The note's "> 一句话：" (one-line summary).  取笔记的一句话总结。"""
     m = re.search(r"^>\s*一句话[：:]\s*(.+)$", s, re.M)
     return m.group(1).strip() if m else ""
 
 
 def tags_of(fm):
+    """Tags from "标签: [a, b]" in front matter; None if the line is missing.  取标签。"""
     m = re.search(r"^标签:\s*\[(.*?)\]", fm, re.M)
     if not m:
         return None
@@ -120,12 +150,15 @@ def tags_of(fm):
 
 
 def nav_theme_line(places):
+    """Build "- 主题：[[topic]] › subsection；…".  生成导航的主题行。"""
     parts = [f"[[{t}]] › {sub}" for t, sub in places]
     return "- 主题：" + "；".join(parts)
 
 
 def update_nav(s, line):
-    """把「## 导航」下的「- 主题：」行换成 line；没有导航就在末尾加。"""
+    """Replace the "- 主题：" line under "## 导航" with `line`; add the section if missing.
+    Returns (new text, changed?).
+    把「## 导航」下的「- 主题：」行换成 line；没有导航就在末尾加。"""
     m = re.search(r"^## 导航\n(.*?)(?=^## |\Z)", s, re.S | re.M)
     if not m:
         return s.rstrip("\n") + f"\n\n## 导航\n{line}\n", True
@@ -185,7 +218,7 @@ def main():
             write(rel, new_s)
             changed.append(rel)
 
-    # 死链
+    # Dead links.  死链
     scan = list(notes.values()) + [os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, THEME_DIR, "*.md"))]
     for rel in scan + [INDEX]:
         for l in LINK.findall(read(rel)):
@@ -193,7 +226,7 @@ def main():
             if t and t not in names:
                 errors.append(f"{rel}：链接指向不存在的笔记「{t}」")
 
-    # 索引
+    # Regenerate the index between the markers.  索引
     idx = read(INDEX)
     if BEGIN in idx and END in idx:
         out = ["## 按主题找"]

@@ -1,4 +1,11 @@
 #!/bin/bash
+# Pass 2, "write": for each line in 待写稿.txt, have the agent write the note from the
+# saved transcript, verify it with a separate sub-agent, run 整理.py, and commit.
+# A line is removed once its note is committed; failed lines stay for next time.
+# Queue format, tab-separated: KIND<TAB>TITLE<TAB>URL-or-note-path
+#   KIND 新 = new note from a new link, 重写 = rewrite an existing note.
+# Usage (from the vault root): nohup caffeinate -i bash 写稿.sh >/dev/null 2>&1 & disown
+#
 # 写稿.sh：第二轮「写稿」。先切到满血号，再照 待写稿.txt 逐篇写稿、核对、整理、提交。
 # 写成一篇就从 待写稿.txt 里删掉那一行；失败的留着，下次接着跑。
 # 用法：在知识库根目录运行  nohup caffeinate -i bash 写稿.sh >/dev/null 2>&1 & disown
@@ -11,15 +18,15 @@ LOGDIR="${VAULT}/重做日志"; mkdir -p "${LOGDIR}"
 RESULT="${LOGDIR}/结果.txt"
 QUEUE="${VAULT}/待写稿.txt"
 LIMIT="${LIMIT:-55m}"; EFFORT="${EFFORT:-medium}"
-WRITE_MODEL_ARGS="${WRITE_MODEL_ARGS:---model gemini-4-neon-${EFFORT}}"   # 写稿用 Gemini 4 Neon（满血号），档位跟着 EFFORT 走：low/medium/high/xhigh；要换模型就在外面设 WRITE_MODEL_ARGS
+WRITE_MODEL_ARGS="${WRITE_MODEL_ARGS:---model gemini-4-neon-${EFFORT}}"   # writing model, effort follows EFFORT; override with WRITE_MODEL_ARGS. 写稿用 Gemini 4 Neon（满血号），档位跟着 EFFORT 走：low/medium/high/xhigh；要换模型就在外面设 WRITE_MODEL_ARGS
 
 [ -s "${QUEUE}" ] || { echo "待写稿.txt 是空的，没东西要写"; exit 0; }
-notify() {   # 跑完在 Mac 右上角弹通知：notify 标题 内容（没有 osascript 就跳过）
+notify() {   # macOS notification: notify TITLE BODY (skipped without osascript). 跑完在 Mac 右上角弹通知：notify 标题 内容（没有 osascript 就跳过）
   command -v osascript >/dev/null 2>&1 || return 0
-  [ "${QUIET:-0}" = 1 ] && return 0   # 夜跑时不一篇一响，只在最后通知
+  [ "${QUIET:-0}" = 1 ] && return 0   # nightly run: one notification at the end, not per video. 夜跑时不一篇一响，只在最后通知
   osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"' -e 'end run' "$1" "$2" >/dev/null 2>&1 || true
 }
-running() {   # 有没有活着的同类进程：running 文件名前缀
+running() {   # is a job with this pid-file prefix still alive? 有没有活着的同类进程：running 文件名前缀
   for f in "${LOGDIR}"/"$1"*.pid; do [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null && return 0; done; return 1
 }
 if running 新视频 || running 重做笔记2; then echo "取材还在跑，等它跑完、切号以后再开"; exit 1; fi
@@ -27,7 +34,7 @@ if running 写稿; then echo "写稿.sh 已经在跑"; exit 1; fi
 PIDF="${LOGDIR}/写稿.pid"; echo $$ > "${PIDF}"; trap 'rm -f "${PIDF}"' EXIT
 
 has_commit() { git log --format=%s | grep -Fxq "$1"; }
-done_line() {   # 从清单删掉这一行
+done_line() {   # remove this exact line from the queue. 从清单删掉这一行
   grep -vxF "$1" "${QUEUE}" > "${QUEUE}.tmp"; mv "${QUEUE}.tmp" "${QUEUE}"
 }
 run_agy() { BOARD_ACTOR=agy agy --dangerously-skip-permissions ${WRITE_MODEL_ARGS} --effort "${EFFORT}" --print-timeout "${LIMIT}" --add-dir "${VAULT}" -p "$2" >"$1" 2>&1 < /dev/null; }
@@ -36,7 +43,7 @@ COMMON="规矩：
 - 提交后关掉所有子代理和后台任务，再写报告。
 - 查子代理进度只看它写出的文件在不在、行数对不对，不读它的过程记录。"
 
-cp "${QUEUE}" "${QUEUE}.本轮"   # 照本轮开始时的清单跑
+cp "${QUEUE}" "${QUEUE}.本轮"   # work from a copy taken at start (the queue changes as we go). 照本轮开始时的清单跑
 ok=0; bad=0
 while IFS= read -r line || [ -n "$line" ]; do
   [ -n "$line" ] || continue

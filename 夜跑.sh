@@ -1,4 +1,14 @@
 #!/bin/bash
+# Nightly run: started at 00:00 by launchd, works through the links in 待提炼.md that
+# haven't been done yet, one at a time (fetch -> write). No new video starts after
+# 09:35, which fits two 5-hour model-quota windows.
+# 待提炼.md is the inbox: you or a chat assistant add links (one per line, or whole
+# share messages). This script only reads it, so it never conflicts with their pushes.
+# Done links go to 重做日志/已提炼.txt (local, not committed); links that failed twice
+# go to 夜跑放弃.txt.
+# Manual test: bash 夜跑.sh   (STOP_AT=HHMM changes the stop time)
+# Manual run:  bash 夜跑.sh URL1 URL2 ...   only these, no pull, no stop time
+#
 # 夜跑.sh：每天 00:00 由定时任务启动，把「待提炼.md」里还没跑过的视频链接一篇一篇跑完（取材 → 写稿），
 # 09:35 以后不再开新篇，正好用满两个五小时额度窗口。
 # 待提炼.md：你自己或聊天助手往里加链接，一行一条、整段分享文字都行；本脚本只读不改它，免得和别人的推送打架。
@@ -13,13 +23,13 @@ INBOX="${VAULT}/待提炼.md"
 DONE="${LOGDIR}/已提炼.txt"; GAVEUP="${LOGDIR}/夜跑放弃.txt"; FAILS="${LOGDIR}/夜跑失败次数.txt"
 NIGHTLOG="${LOGDIR}/夜跑-$(date +%m%d).log"
 MANUAL=0; [ $# -gt 0 ] && MANUAL=1
-if [ "${MANUAL}" = 1 ]; then STOP_AT="${STOP_AT:-2400}"; else STOP_AT="${STOP_AT:-0935}"; fi   # 这个时刻（HHMM）以后不开新篇
-QUOTA_WAIT="${QUOTA_WAIT:-1800}"      # 额度用完时，等多少秒再试
+if [ "${MANUAL}" = 1 ]; then STOP_AT="${STOP_AT:-2400}"; else STOP_AT="${STOP_AT:-0935}"; fi   # no new video after this time (HHMM). 这个时刻（HHMM）以后不开新篇
+QUOTA_WAIT="${QUOTA_WAIT:-1800}"      # seconds to wait when the model quota looks exhausted. 额度用完时，等多少秒再试
 touch "${DONE}" "${GAVEUP}" "${FAILS}"
 SKIPPED=0
 if [ "${MANUAL}" = 1 ]; then
   INBOX="${LOGDIR}/手动-$$.txt"; printf '%s\n' "$@" > "${INBOX}"
-  SKIPPED="$(grep -cxF -f "${DONE}" "${INBOX}")"   # 已经提炼过的不重跑
+  SKIPPED="$(grep -cxF -f "${DONE}" "${INBOX}")"   # links already done are skipped. 已经提炼过的不重跑
 fi
 exec >>"${NIGHTLOG}" 2>&1
 
@@ -29,13 +39,14 @@ notify() {
 }
 log() { echo "$(date '+%m-%d %H:%M') $*"; }
 now() { date +%H%M; }
+# Board logging under the name 夜跑; a dead board never blocks the run (20 s timeout via perl alarm, errors ignored).
 # 看板：夜跑自己记，署名「夜跑」；连不上看板也不影响跑（20 秒超时，失败就算了）
 board_cmd() {
   if command -v board >/dev/null 2>&1; then BOARD_ACTOR="${ACTOR:-夜跑}" perl -e 'alarm 20; exec @ARGV' board "$@"
   else BOARD_ACTOR="${ACTOR:-夜跑}" perl -e 'alarm 20; exec @ARGV' python3 "${VAULT}/工具/看板服务/board.py" "$@"; fi
 }
 BOARD_ID=""
-board_start() {   # 今晚有活才建一条任务并认领
+board_start() {   # create and claim a board task only if there is work tonight. 今晚有活才建一条任务并认领
   [ -n "${BOARD_ID}" ] && return 0
   if [ "${MANUAL}" = 1 ]; then title="手动提炼 $(date +%m-%d\ %H:%M)"; desc="视频提炼：手动点视频提炼.command"; else title="夜跑 $(date +%m-%d)"; desc="视频提炼：读 待提炼.md，00:00 跑到 ${STOP_AT}"; fi
   BOARD_ID="$(board_cmd add "${title}" "${desc}" 2>/dev/null | sed -n 's/^#\([0-9][0-9]*\).*/\1/p' | head -1)"
@@ -45,8 +56,9 @@ board_start() {   # 今晚有活才建一条任务并认领
 board_log() { [ -n "${BOARD_ID}" ] && [ "${BOARD_ID}" != "-" ] && board_cmd log "${BOARD_ID}" "$1" "${2:-}" >/dev/null 2>&1 || true; }
 board_end() { [ -n "${BOARD_ID}" ] && [ "${BOARD_ID}" != "-" ] && board_cmd "$1" "${BOARD_ID}" "$2" >/dev/null 2>&1 || true; }
 
-past_stop() { [ "$(now)" -ge "${STOP_AT}" ] && [ "$(now)" -lt 1200 ]; }   # 只认上午的停止时间，00:00 开跑时不会误判
+past_stop() { [ "$(now)" -ge "${STOP_AT}" ] && [ "$(now)" -lt 1200 ]; }   # stop time counts only in the morning, so the 00:00 start isn't mistaken for "past stop". 只认上午的停止时间，00:00 开跑时不会误判
 
+# Only one job at a time; 视频提炼.command and manual runs check the same pid files.
 # 同时只跑一份；视频提炼.command 和手动跑的脚本也认这个 pid
 for f in "${LOGDIR}"/*.pid; do
   if [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null; then log "已有任务在跑（$f），今晚不开"; exit 0; fi
@@ -54,10 +66,12 @@ done
 PIDF="${LOGDIR}/夜跑.pid"; echo $$ > "${PIDF}"; trap 'rm -f "${PIDF}"' EXIT
 
 if [ "${MANUAL}" = 1 ]; then log "=== 手动提炼开始：$# 条"; else log "=== 夜跑开始"; fi
+# Pull links others pushed; local uncommitted changes are stashed and restored.
 # 拿别人推上来的新链接；本地没提交的改动先收起来再放回
 if [ "${MANUAL}" = 0 ] && ! git pull --rebase --autostash -q; then
   log "git pull 失败，用本地的 待提炼.md 接着跑"; git rebase --abort >/dev/null 2>&1
 fi
+# Agents without the board token (e.g. cloud ones) append lines to 重做日志/看板待补记.txt; we post them as board notes with this Mac's token.
 # 拿不到看板口令的 AI（比如云端的）把要记的事写进 重做日志/看板待补记.txt，一行一条；这里用 Mac 的口令代它记成 board note
 PENDING="${LOGDIR}/看板待补记.txt"
 if [ -s "${PENDING}" ]; then
@@ -71,19 +85,19 @@ fi
 [ -f "${INBOX}" ] || { log "没有 待提炼.md，结束"; exit 0; }
 
 PAT='https?://(v\.douyin\.com|www\.douyin\.com/video|b23\.tv|(www\.)?bilibili\.com/video|youtu\.be|(www\.)?youtube\.com/(watch|shorts)|xhslink\.com|(www\.)?xiaohongshu\.com/(explore|discovery))[^[:space:]，。！？」)]*'
-pending() {   # 待提炼.md 里的链接，去掉已跑完的和已放弃的
+pending() {   # links in the inbox, minus done and given-up ones. 待提炼.md 里的链接，去掉已跑完的和已放弃的
   grep -oE "${PAT}" "${INBOX}" | awk '!seen[$0]++' | grep -vxF -f "${DONE}" | grep -vxF -f "${GAVEUP}"
 }
-new_subjects() {   # 这一篇开跑以后「新写出来」的提交标题；按作者时间算，别人中途 rebase 改了提交号也不会把旧提交算进来
+new_subjects() {   # subjects of commits made since this video started (by author time, rebase-safe). 这一篇开跑以后「新写出来」的提交标题；按作者时间算，别人中途 rebase 改了提交号也不会把旧提交算进来
   git log -50 --format='%at%x09%s' | awk -F'\t' -v t="$1" '$1>=t {print $2}'
 }
 fail_count() { grep -cxF "$1" "${FAILS}"; }
-quota_hit() {   # 最近的 agy 日志里有没有额度用完的字样（字样以 agy 实际报错为准，待核实）
+quota_hit() {   # does the latest agy log look like a quota error? (exact wording still to be verified against real agy output) 最近的 agy 日志里有没有额度用完的字样（字样以 agy 实际报错为准，待核实）
   tail -c 4000 "$(ls -t "${LOGDIR}"/*.log 2>/dev/null | grep -v '夜跑-' | head -1)" 2>/dev/null \
     | grep -qiE 'quota|exhausted|rate.?limit|429|额度|配额'
 }
 
-TONIGHT="${LOGDIR}/夜跑今晚失败.txt"; : > "${TONIGHT}"   # 今晚失败过的，今晚不再碰
+TONIGHT="${LOGDIR}/夜跑今晚失败.txt"; : > "${TONIGHT}"   # failed once tonight: don't retry tonight. 今晚失败过的，今晚不再碰
 todo() { pending | grep -vxF -f "${TONIGHT}"; }
 
 ok=0; bad=0
